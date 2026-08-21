@@ -40,7 +40,7 @@ type PanState = {
 type MarqueeState = { startX: number; startY: number } | null;
 type Rect = { x: number; y: number; w: number; h: number };
 
-export default function FlowchartEditor() {
+export default function FlowchartEditor({ diagramId }: { diagramId?: string } = {}) {
   const [graph, setGraph] = useState<Graph>(emptyGraph());
   const [selected, setSelected] = useState<Selection>(null);
   const [multiSelected, setMultiSelected] = useState<Set<string>>(new Set());
@@ -91,24 +91,65 @@ export default function FlowchartEditor() {
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        setGraph(dedupeGraph(JSON.parse(saved)));
-        return;
-      } catch {
-        // fall through to default import
-      }
-    }
-    setGraph(layoutGraph(parseMermaidFlowchart(DEFAULT_SOURCE)));
-  }, []);
+  const loadedRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (graph.nodes.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(graph));
+    let cancelled = false;
+    async function load() {
+      if (diagramId) {
+        try {
+          const res = await fetch(`/api/diagrams/${diagramId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (!cancelled) setGraph(dedupeGraph(data));
+            loadedRef.current = true;
+            return;
+          }
+        } catch {
+          // fall through to default
+        }
+        if (!cancelled) setGraph(layoutGraph(parseMermaidFlowchart(DEFAULT_SOURCE)));
+        loadedRef.current = true;
+        return;
+      }
+
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        try {
+          if (!cancelled) setGraph(dedupeGraph(JSON.parse(saved)));
+          loadedRef.current = true;
+          return;
+        } catch {
+          // fall through to default import
+        }
+      }
+      if (!cancelled) setGraph(layoutGraph(parseMermaidFlowchart(DEFAULT_SOURCE)));
+      loadedRef.current = true;
     }
-  }, [graph]);
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [diagramId]);
+
+  useEffect(() => {
+    if (!loadedRef.current || graph.nodes.length === 0) return;
+
+    if (diagramId) {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        fetch(`/api/diagrams/${diagramId}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(graph),
+        }).catch(() => {});
+      }, 500);
+      return;
+    }
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(graph));
+  }, [graph, diagramId]);
 
   const toSvgPoint = useCallback(
     (clientX: number, clientY: number) => {
