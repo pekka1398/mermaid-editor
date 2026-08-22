@@ -501,8 +501,28 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
             const isSelected = selected?.type === "edge" && selected.id === edge.id;
             const mx = (fcx + tcx) / 2;
             const my = (fcy + tcy) / 2;
+            const handleEdgeClick = (e: React.MouseEvent) => {
+              e.stopPropagation();
+              setSelected({ type: "edge", id: edge.id });
+            };
+            const handleEdgeDoubleClick = (e: React.MouseEvent) => {
+              e.stopPropagation();
+              setEditing({ type: "edge", id: edge.id, value: edge.label });
+            };
             return (
               <g key={edge.id}>
+                <line
+                  data-edge-id={edge.id}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke="transparent"
+                  strokeWidth={16}
+                  className="cursor-pointer"
+                  onClick={handleEdgeClick}
+                  onDoubleClick={handleEdgeDoubleClick}
+                />
                 <line
                   data-edge-id={edge.id}
                   x1={x1}
@@ -512,15 +532,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
                   stroke={isSelected ? "#2563eb" : "#71717a"}
                   strokeWidth={isSelected ? 2.5 : 1.5}
                   markerEnd={isSelected ? "url(#arrow-end-selected)" : "url(#arrow-end)"}
-                  className="cursor-pointer text-zinc-500"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelected({ type: "edge", id: edge.id });
-                  }}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    setEditing({ type: "edge", id: edge.id, value: edge.label });
-                  }}
+                  className="pointer-events-none text-zinc-500"
                 />
                 {edge.label && (
                   <text
