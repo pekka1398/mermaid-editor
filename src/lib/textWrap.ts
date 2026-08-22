@@ -9,6 +9,12 @@ function getMeasureCtx(font: string): CanvasRenderingContext2D {
   return ctx;
 }
 
+// CJK characters wrap individually (no spaces between them); everything
+// else wraps as whitespace-delimited words.
+const CJK_RANGE =
+  "\\u3000-\\u303f\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\uff00-\\uffef";
+const TOKEN_PATTERN = new RegExp(`[${CJK_RANGE}]|[^\\s${CJK_RANGE}]+`, "g");
+
 export function wrapText(
   text: string,
   maxWidth: number,
@@ -16,34 +22,41 @@ export function wrapText(
   font = "14px sans-serif"
 ): string[] {
   const ctx = getMeasureCtx(font);
-  const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = "";
 
   const width = (s: string) => ctx.measureText(s).width;
 
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (width(candidate) <= maxWidth) {
-      current = candidate;
-      continue;
-    }
-    if (current) lines.push(current);
-    if (width(word) <= maxWidth) {
-      current = word;
-      continue;
-    }
-    let chunk = "";
-    for (const char of word) {
-      const test = chunk + char;
-      if (width(test) <= maxWidth) {
-        chunk = test;
-      } else {
-        if (chunk) lines.push(chunk);
-        chunk = char;
+  const spaceChunks = text.split(/(\s+)/).filter(Boolean);
+
+  for (const chunk of spaceChunks) {
+    if (/^\s+$/.test(chunk)) continue;
+    const tokens = chunk.match(TOKEN_PATTERN) || [chunk];
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      const needsSpace = i === 0 && current.length > 0;
+      const candidate = needsSpace ? `${current} ${token}` : `${current}${token}`;
+      if (width(candidate) <= maxWidth) {
+        current = candidate;
+        continue;
       }
+      if (current) lines.push(current);
+      if (width(token) <= maxWidth) {
+        current = token;
+        continue;
+      }
+      let piece = "";
+      for (const char of token) {
+        const test = piece + char;
+        if (width(test) <= maxWidth) {
+          piece = test;
+        } else {
+          if (piece) lines.push(piece);
+          piece = char;
+        }
+      }
+      current = piece;
     }
-    current = chunk;
   }
   if (current) lines.push(current);
   if (lines.length === 0) lines.push("");
