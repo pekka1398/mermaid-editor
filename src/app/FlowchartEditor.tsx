@@ -628,24 +628,43 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
           const node = graph.nodes.find((n) => n.id === editing.id);
           if (!node) return null;
           const screen = svgRectToScreen(node.x, node.y, node.w, node.h);
+          const scale = screen.width / node.w;
+          const fontSize = 14 * scale;
+          const autosize = (el: HTMLTextAreaElement | null) => {
+            if (!el) return;
+            el.style.height = "auto";
+            el.style.height = `${Math.max(el.scrollHeight, screen.height)}px`;
+          };
           return (
-            <input
+            <textarea
               autoFocus
+              ref={autosize}
               value={editing.value}
-              onChange={(e) => setEditing({ ...editing, value: e.target.value })}
+              onChange={(e) => {
+                setEditing({ ...editing, value: e.target.value });
+                autosize(e.target);
+              }}
+              onFocus={(e) => e.target.select()}
               onBlur={commitEdit}
               onKeyDown={(e) => {
-                if (e.key === "Enter") commitEdit();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitEdit();
+                }
                 if (e.key === "Escape") setEditing(null);
               }}
+              rows={1}
               style={{
                 position: "absolute",
                 left: screen.left,
                 top: screen.top,
                 width: screen.width,
-                height: screen.height,
+                minHeight: screen.height,
+                fontSize,
+                padding: `${4 * scale}px ${8 * scale}px`,
+                zIndex: 10,
               }}
-              className="rounded border border-blue-500 bg-white px-2 text-center text-sm text-zinc-900 outline-none"
+              className="resize-none overflow-hidden rounded border border-blue-500 bg-white text-center leading-tight text-zinc-900 outline-none"
             />
           );
         })()}
