@@ -17,11 +17,20 @@ export interface GraphEdge {
   label: string;
 }
 
+export interface GraphStroke {
+  id: string;
+  /** flattened [x0, y0, x1, y1, ...] in diagram (SVG) coordinates */
+  points: number[];
+  color: string;
+  width: number;
+}
+
 export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  strokes?: GraphStroke[];
 }
 
 export function emptyGraph(): Graph {
-  return { nodes: [], edges: [] };
+  return { nodes: [], edges: [], strokes: [] };
 }

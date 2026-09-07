@@ -22,10 +22,36 @@ export function wrapText(
   font = "14px sans-serif"
 ): string[] {
   const ctx = getMeasureCtx(font);
+  const width = (s: string) => ctx.measureText(s).width;
+
+  // Honour explicit (Ctrl+Enter) line breaks, then word-wrap each segment.
+  const hardSegments = text.split(/\r?\n/);
+  let lines: string[] = [];
+  for (const segment of hardSegments) {
+    const wrapped = wrapSegment(segment, maxWidth, width);
+    lines = lines.concat(wrapped.length ? wrapped : [""]);
+  }
+  if (lines.length === 0) lines.push("");
+
+  if (lines.length > maxLines) {
+    const truncated = lines.slice(0, maxLines);
+    let last = truncated[maxLines - 1];
+    while (last.length > 0 && width(`${last}…`) > maxWidth) {
+      last = last.slice(0, -1);
+    }
+    truncated[maxLines - 1] = `${last}…`;
+    return truncated;
+  }
+  return lines;
+}
+
+function wrapSegment(
+  text: string,
+  maxWidth: number,
+  width: (s: string) => number
+): string[] {
   const lines: string[] = [];
   let current = "";
-
-  const width = (s: string) => ctx.measureText(s).width;
 
   const spaceChunks = text.split(/(\s+)/).filter(Boolean);
 
@@ -59,17 +85,5 @@ export function wrapText(
     }
   }
   if (current) lines.push(current);
-  if (lines.length === 0) lines.push("");
-
-  if (lines.length > maxLines) {
-    const truncated = lines.slice(0, maxLines);
-    let last = truncated[maxLines - 1];
-    while (last.length > 0 && width(`${last}…`) > maxWidth) {
-      last = last.slice(0, -1);
-    }
-    truncated[maxLines - 1] = `${last}…`;
-    return truncated;
-  }
-
   return lines;
 }

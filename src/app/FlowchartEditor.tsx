@@ -1,17 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Graph, GraphNode, emptyGraph } from "@/lib/graph";
+import { Graph, GraphNode, GraphStroke, emptyGraph } from "@/lib/graph";
 import { parseMermaidFlowchart } from "@/lib/parseMermaid";
 import { layoutGraph } from "@/lib/layout";
 import { graphToMermaid } from "@/lib/exportMermaid";
 import { wrapText } from "@/lib/textWrap";
 
-const NODE_MAX_LINES = 3;
+const NODE_MAX_LINES = 8;
 const NODE_LINE_HEIGHT = 16;
 const NODE_TEXT_PADDING = 12;
 
 const STORAGE_KEY = "flowchart-editor:graph";
+const STROKE_COLOR = "#e4e4e7";
+const STROKE_WIDTH = 2;
+const ERASE_RADIUS = 10; // screen px
 const MIN_VIEW_W = 200;
 const MAX_VIEW_W = 8000;
 
@@ -26,7 +29,8 @@ function nextId(prefix: string) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-type Selection = { type: "node" | "edge"; id: string } | null;
+type Selection = { type: "node" | "edge" | "stroke"; id: string } | null;
+type DrawState = { id: string; points: number[] } | null;
 type Editing = { type: "node" | "edge"; id: string; value: string } | null;
 type Dragging = { ids: string[]; offsets: Record<string, { x: number; y: number }> } | null;
 type ViewBox = { x: number; y: number; w: number; h: number };
@@ -51,6 +55,10 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   const [importText, setImportText] = useState(DEFAULT_SOURCE);
   const [view, setView] = useState<ViewBox>({ x: 0, y: 0, w: 1200, h: 800 });
   const [marqueeRect, setMarqueeRect] = useState<Rect | null>(null);
+  const [penMode, setPenMode] = useState(false);
+  const [eraserMode, setEraserMode] = useState(false);
+  const [drawPoints, setDrawPoints] = useState<number[] | null>(null);
+  const drawRef = useRef<DrawState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<PanState>(null);
@@ -134,7 +142,8 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   }, [diagramId]);
 
   useEffect(() => {
-    if (!loadedRef.current || graph.nodes.length === 0) return;
+    if (!loadedRef.current) return;
+    if (graph.nodes.length === 0 && (graph.strokes?.length ?? 0) === 0) return;
 
     if (diagramId) {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -217,8 +226,49 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
     }
   }
 
+  const svgTolerance = useCallback(
+    (screenPx: number) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0) return screenPx;
+      return (screenPx * view.w) / rect.width;
+    },
+    [view]
+  );
+
+  const eraseAt = useCallback(
+    (clientX: number, clientY: number) => {
+      const p = toSvgPoint(clientX, clientY);
+      const tol = svgTolerance(ERASE_RADIUS);
+      setGraph((g) => {
+        const strokes = g.strokes ?? [];
+        const kept = strokes.filter((s) => !strokeHit(s, p.x, p.y, tol));
+        return kept.length === strokes.length ? g : { ...g, strokes: kept };
+      });
+    },
+    [toSvgPoint, svgTolerance]
+  );
+
+  function startStroke(clientX: number, clientY: number) {
+    panRef.current = null;
+    marqueeRef.current = null;
+    setMarqueeRect(null);
+    const p = toSvgPoint(clientX, clientY);
+    drawRef.current = { id: nextId("s"), points: [p.x, p.y] };
+    setDrawPoints([p.x, p.y]);
+  }
+
   function handleBackgroundPointerDown(e: React.PointerEvent) {
     if ((e.target as SVGElement).closest("[data-node-id],[data-edge-id]")) return;
+    // Freehand: left+right chord, or pen mode with left button
+    if (e.buttons === 3 || (penMode && e.button === 0 && !e.shiftKey)) {
+      e.preventDefault();
+      startStroke(e.clientX, e.clientY);
+      return;
+    }
+    if (eraserMode && e.button === 0) {
+      eraseAt(e.clientX, e.clientY);
+      return;
+    }
     if (e.shiftKey) {
       const p = toSvgPoint(e.clientX, e.clientY);
       marqueeRef.current = { startX: p.x, startY: p.y };
@@ -238,6 +288,22 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   }
 
   function handlePointerMove(e: React.PointerEvent) {
+    if (drawRef.current) {
+      // stop if all buttons released or chord broken without pen mode
+      if (e.buttons === 0) return;
+      const p = toSvgPoint(e.clientX, e.clientY);
+      drawRef.current.points.push(p.x, p.y);
+      setDrawPoints(drawRef.current.points.slice());
+      return;
+    }
+    if (!drawRef.current && e.buttons === 3 && !(e.target as SVGElement).closest("[data-node-id],[data-edge-id]")) {
+      startStroke(e.clientX, e.clientY);
+      return;
+    }
+    if (eraserMode && e.buttons === 1) {
+      eraseAt(e.clientX, e.clientY);
+      return;
+    }
     if (dragging) {
       const p = toSvgPoint(e.clientX, e.clientY);
       setGraph((g) => ({
@@ -276,6 +342,21 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   }
 
   function handlePointerUp() {
+    if (drawRef.current) {
+      const s = drawRef.current;
+      drawRef.current = null;
+      setDrawPoints(null);
+      if (s.points.length >= 4) {
+        const stroke: GraphStroke = {
+          id: s.id,
+          points: s.points,
+          color: STROKE_COLOR,
+          width: STROKE_WIDTH,
+        };
+        setGraph((g) => ({ ...g, strokes: [...(g.strokes ?? []), stroke] }));
+      }
+      return;
+    }
     setDragging(null);
     panRef.current = null;
     if (marqueeRef.current && marqueeRect) {
@@ -321,9 +402,16 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
     if (editing.type === "node") {
       setGraph((g) => ({
         ...g,
-        nodes: g.nodes.map((n) =>
-          n.id === editing.id ? { ...n, label: editing.value } : n
-        ),
+        nodes: g.nodes.map((n) => {
+          if (n.id !== editing.id) return n;
+          const lines = wrapText(
+            editing.value,
+            n.w - NODE_TEXT_PADDING * 2,
+            NODE_MAX_LINES
+          );
+          const h = Math.max(56, lines.length * NODE_LINE_HEIGHT + 24);
+          return { ...n, label: editing.value, h };
+        }),
       }));
     } else {
       setGraph((g) => ({
@@ -339,6 +427,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   const deleteSelected = useCallback(() => {
     if (multiSelected.size > 0) {
       setGraph((g) => ({
+        ...g,
         nodes: g.nodes.filter((n) => !multiSelected.has(n.id)),
         edges: g.edges.filter((e) => !multiSelected.has(e.from) && !multiSelected.has(e.to)),
       }));
@@ -348,8 +437,14 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
     if (!selected) return;
     if (selected.type === "node") {
       setGraph((g) => ({
+        ...g,
         nodes: g.nodes.filter((n) => n.id !== selected.id),
         edges: g.edges.filter((e) => e.from !== selected.id && e.to !== selected.id),
+      }));
+    } else if (selected.type === "stroke") {
+      setGraph((g) => ({
+        ...g,
+        strokes: (g.strokes ?? []).filter((s) => s.id !== selected.id),
       }));
     } else {
       setGraph((g) => ({ ...g, edges: g.edges.filter((e) => e.id !== selected.id) }));
@@ -360,9 +455,26 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (editing) return;
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+      if (e.key === "Escape") {
+        setPenMode(false);
+        setEraserMode(false);
+        return;
+      }
+      if (e.key === "p" || e.key === "P") {
+        e.preventDefault();
+        setPenMode((v) => !v);
+        setEraserMode(false);
+        return;
+      }
+      if (e.key === "e" || e.key === "E") {
+        e.preventDefault();
+        setEraserMode((v) => !v);
+        setPenMode(false);
+        return;
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && (selected || multiSelected.size > 0)) {
-        const active = document.activeElement;
-        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
         e.preventDefault();
         deleteSelected();
       }
@@ -408,6 +520,34 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
       <main ref={containerRef} className="relative flex-1 overflow-hidden">
         <div className="absolute right-4 top-4 z-10 flex gap-2">
           <button
+            onClick={() => {
+              setPenMode((v) => !v);
+              setEraserMode(false);
+            }}
+            className={`rounded border px-3 py-1 text-xs font-medium shadow-sm backdrop-blur ${
+              penMode
+                ? "border-blue-500 bg-blue-600 text-white"
+                : "border-zinc-300 bg-white/90 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200"
+            }`}
+            title="Freehand draw — hotkey P, or hold left+right mouse buttons"
+          >
+            Draw
+          </button>
+          <button
+            onClick={() => {
+              setEraserMode((v) => !v);
+              setPenMode(false);
+            }}
+            className={`rounded border px-3 py-1 text-xs font-medium shadow-sm backdrop-blur ${
+              eraserMode
+                ? "border-blue-500 bg-blue-600 text-white"
+                : "border-zinc-300 bg-white/90 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200"
+            }`}
+            title="Erase strokes — hotkey E"
+          >
+            Erase
+          </button>
+          <button
             onClick={() => setShowImport(true)}
             className="rounded border border-zinc-300 bg-white/90 px-3 py-1 text-xs font-medium text-zinc-700 shadow-sm backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200"
           >
@@ -442,7 +582,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
               justMarqueedRef.current = false;
               return;
             }
-            if (!(e.target as SVGElement).closest("[data-node-id],[data-edge-id]")) {
+            if (!(e.target as SVGElement).closest("[data-node-id],[data-edge-id],[data-stroke-id]")) {
               setSelected(null);
               setConnectFrom(null);
               setMultiSelected(new Set());
@@ -453,6 +593,9 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
               e.preventDefault();
               setConnectFrom(null);
             }
+          }}
+          style={{
+            cursor: eraserMode ? "cell" : penMode ? "crosshair" : undefined,
           }}
         >
           <defs>
@@ -466,7 +609,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
               orient="auto"
               overflow="visible"
             >
-              <path d="M0,0 L12,6 L0,12 z" fill="#52525b" />
+              <path d="M0,0 L12,6 L0,12 z" fill="#d4d4d8" />
             </marker>
             <marker
               id="arrow-end-selected"
@@ -529,7 +672,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
                   y1={y1}
                   x2={x2}
                   y2={y2}
-                  stroke={isSelected ? "#2563eb" : "#71717a"}
+                  stroke={isSelected ? "#2563eb" : "#d4d4d8"}
                   strokeWidth={isSelected ? 2.5 : 1.5}
                   markerEnd={isSelected ? "url(#arrow-end-selected)" : "url(#arrow-end)"}
                   className="pointer-events-none text-zinc-500"
@@ -547,6 +690,57 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
               </g>
             );
           })}
+
+          {(graph.strokes ?? []).map((s) => {
+            const isSelected = selected?.type === "stroke" && selected.id === s.id;
+            const d = pointsToPath(s.points);
+            return (
+              <g key={s.id}>
+                <path
+                  data-stroke-id={s.id}
+                  d={d}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={(s.width ?? STROKE_WIDTH) + 12}
+                  strokeLinecap="round"
+                  className={eraserMode ? "cursor-cell" : "cursor-pointer"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (eraserMode) {
+                      setGraph((g) => ({
+                        ...g,
+                        strokes: (g.strokes ?? []).filter((x) => x.id !== s.id),
+                      }));
+                      return;
+                    }
+                    setSelected({ type: "stroke", id: s.id });
+                    setMultiSelected(new Set());
+                  }}
+                />
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={isSelected ? "#2563eb" : s.color ?? STROKE_COLOR}
+                  strokeWidth={s.width ?? STROKE_WIDTH}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="pointer-events-none"
+                />
+              </g>
+            );
+          })}
+
+          {drawPoints && drawPoints.length >= 2 && (
+            <path
+              d={pointsToPath(drawPoints)}
+              fill="none"
+              stroke={STROKE_COLOR}
+              strokeWidth={STROKE_WIDTH}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="pointer-events-none"
+            />
+          )}
 
           {graph.nodes.map((node) => {
             const isMulti = multiSelected.has(node.id);
@@ -595,7 +789,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
                   return (
                     <text
                       textAnchor="middle"
-                      className="pointer-events-none select-none fill-zinc-800 text-sm dark:fill-zinc-100"
+                      className="pointer-events-none select-none fill-zinc-800 text-sm"
                     >
                       {lines.map((line, i) => (
                         <tspan key={i} x={cx} y={startY + i * NODE_LINE_HEIGHT} dominantBaseline="middle">
@@ -647,6 +841,18 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
               onFocus={(e) => e.target.select()}
               onBlur={commitEdit}
               onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey || e.altKey)) {
+                  e.preventDefault();
+                  const el = e.currentTarget;
+                  const { selectionStart: s, selectionEnd: end, value } = el;
+                  const next = value.slice(0, s) + "\n" + value.slice(end);
+                  setEditing({ ...editing, value: next });
+                  requestAnimationFrame(() => {
+                    el.selectionStart = el.selectionEnd = s + 1;
+                    autosize(el);
+                  });
+                  return;
+                }
                 if (e.key === "Enter") {
                   e.preventDefault();
                   commitEdit();
@@ -754,7 +960,41 @@ function dedupeGraph(graph: Graph): Graph {
     return { ...edge, id };
   });
 
-  return { nodes, edges };
+  return { nodes, edges, strokes: graph.strokes ?? [] };
+}
+
+function distToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+
+function strokeHit(stroke: GraphStroke, x: number, y: number, tol: number) {
+  const p = stroke.points;
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    if (distToSegment(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= tol) return true;
+  }
+  if (p.length === 2) return Math.hypot(x - p[0], y - p[1]) <= tol;
+  return false;
+}
+
+function pointsToPath(points: number[]) {
+  if (points.length < 2) return "";
+  let d = `M ${points[0]} ${points[1]}`;
+  for (let i = 2; i + 1 < points.length; i += 2) d += ` L ${points[i]} ${points[i + 1]}`;
+  return d;
 }
 
 function borderPoint(
