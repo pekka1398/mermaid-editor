@@ -367,7 +367,17 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
             n.x < x + w && n.x + n.w > x && n.y < y + h && n.y + n.h > y
         )
         .map((n) => n.id);
-      setMultiSelected(new Set(ids));
+      const strokeIds = (graph.strokes ?? [])
+        .filter((s) => {
+          for (let i = 0; i + 1 < s.points.length; i += 2) {
+            const px = s.points[i];
+            const py = s.points[i + 1];
+            if (px >= x && px <= x + w && py >= y && py <= y + h) return true;
+          }
+          return false;
+        })
+        .map((s) => s.id);
+      setMultiSelected(new Set([...ids, ...strokeIds]));
       setSelected(null);
       marqueeRef.current = null;
       setMarqueeRect(null);
@@ -430,6 +440,7 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
         ...g,
         nodes: g.nodes.filter((n) => !multiSelected.has(n.id)),
         edges: g.edges.filter((e) => !multiSelected.has(e.from) && !multiSelected.has(e.to)),
+        strokes: (g.strokes ?? []).filter((s) => !multiSelected.has(s.id)),
       }));
       setMultiSelected(new Set());
       return;
@@ -692,7 +703,9 @@ export default function FlowchartEditor({ diagramId }: { diagramId?: string } = 
           })}
 
           {(graph.strokes ?? []).map((s) => {
-            const isSelected = selected?.type === "stroke" && selected.id === s.id;
+            const isSelected =
+              (selected?.type === "stroke" && selected.id === s.id) ||
+              multiSelected.has(s.id);
             const d = pointsToPath(s.points);
             return (
               <g key={s.id}>
